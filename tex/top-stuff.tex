@@ -1,0 +1,22 @@
+% % Start each section on its own page
+% \let\stdsection\section
+% \renewcommand\section{\newpage\stdsection}
+% 
+% % Start each subsection on its own page too
+% \let\stdsubsection\subsection
+% \renewcommand\subsection{\newpage\stdsubsection}
+
+% Switch fonts according to language!
+% Adapted from http://tex.stackexchange.com/a/129032/11851
+\usepackage{fontspec}
+\usepackage{polyglossia}
+\usepackage{bidi}
+\usepackage[Latin, Arabic]{ucharclasses}
+
+\newfontfamily{\Arabic}{Al Tarikh}
+
+\setDefaultTransitions{\normalfont}{}
+\setTransitionsFor{Arabic}{\Arabic}{}
+
+\newcommand{\stgroup}{\begingroup}
+\newcommand{\fingroup}{\endgroup}

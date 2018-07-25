@@ -1,0 +1,13 @@
+# Data
+data/raw/*
+data/ne_*
+
+# Output
+*.pdf
+*.html
+
+# R stuff
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
