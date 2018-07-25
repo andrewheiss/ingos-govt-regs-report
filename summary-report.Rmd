@@ -1,0 +1,944 @@
+---
+redact: True
+title: |
+  | International NGOs and Government Regulations Survey Results Raw Report
+  | • • •
+  | Text responses redacted for anonymity
+  | • • •
+author: "Andrew Heiss"
+date: "2018-07-24 (last run `r format(Sys.time(), '%F')`)"
+mainfont: Source Sans Pro
+fontsize: 10pt
+output:
+  pdf_document:
+    dev: cairo_pdf
+    fig_height: 3
+    fig_width: 5
+    includes:
+      in_header: tex/top-stuff.tex
+    latex_engine: xelatex
+    toc: yes
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.align = "center")
+```
+
+```{r load-libraries-data, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(ggstance)
+library(scales)
+library(countrycode)
+library(sf)
+library(glue)
+library(pander)
+library(here)
+
+redact <- rmarkdown::metadata$redact
+
+# Load cleaned, country-based survey data (*with* the Q4\* loop)
+survey_clean_all <- readRDS(here("data", "raw", "survey_clean_all.rds")) %>%
+  mutate(Q4.11_collapsed = ordered(fct_recode(Q4.11, NULL = "Don't know", 
+                                              NULL = "Prefer not to answer"))) %>%
+  mutate(Q2.5_count = as.numeric(Q2.5_count))
+
+# Load cleaned, organization-based data (without the Q4 loop)
+survey_orgs_clean <- readRDS(here("data", "raw", "survey_orgs_clean.rds"))
+
+# Load cleaned, country-based data (only the Q4 loop)
+survey_countries_clean <- readRDS(here("data", "raw", "survey_countries_clean.rds"))
+
+# World shapefiles from http://www.naturalearthdata.com/
+# Robinson projection
+projection = 54030
+
+world_shapes <- st_read(here("data", "ne_110m_admin_0_countries",
+                             "ne_110m_admin_0_countries.shp"),
+                        quiet = TRUE) %>% 
+  filter(ISO_A3 != "ATA") %>% 
+  # Fix some Natural Earth ISO weirdness
+  mutate(ISO_A3 = ifelse(ISO_A3 == "-99", as.character(ISO_A3_EH), as.character(ISO_A3))) %>% 
+  mutate(ISO_A3 = case_when(
+    .$ISO_A3 == "GRL" ~ "DNK",
+    .$NAME == "Norway" ~ "NOR",
+    TRUE ~ ISO_A3
+  ))
+```
+
+```{r plot-functions}
+theme_ingos <- function(base_size = 10, base_family = "Archivo Narrow", density = FALSE) {
+  update_geom_defaults("label", list(family = "Archivo Narrow", face = "plain"))
+  update_geom_defaults("text", list(family = "Archivo Narrow", face = "plain"))
+  
+  ret <- theme_bw(base_size, base_family) +
+    theme(plot.title = element_text(size = rel(1.4), face = "plain",
+                                    family = "Archivo Narrow Bold"),
+          plot.subtitle = element_text(size = rel(1), face = "plain",
+                                       family = "Archivo Narrow"),
+          plot.caption = element_text(size = rel(0.8), color = "grey50", face = "plain",
+                                      family = "Archivo Narrow",
+                                      margin = margin(t = 10)),
+          plot.tag = element_text(size = rel(1), face = "plain", color = "grey50",
+                                  family = "Archivo Narrow Bold"),
+          strip.text = element_text(size = rel(0.8), face = "plain",
+                                    family = "Archivo Narrow Medium"),
+          strip.text.x = element_text(margin = margin(t = 1, b = 1)),
+          panel.border = element_blank(), 
+          strip.background = element_rect(fill = "#ffffff", colour = NA),
+          axis.ticks = element_blank(),
+          axis.title.x = element_text(margin = margin(t = 10)),
+          legend.margin = margin(t = 0),
+          legend.title = element_text(size = rel(0.8)),
+          legend.position = "bottom")
+  
+  ret
+}
+
+theme_ingos_map <- function(base_size = 10, base_family = "Archivo Narrow") {
+  ret <- theme_void(base_size, base_family) +
+    theme(legend.position = "bottom")
+  
+  ret
+}
+
+bar_chart_single <- function(data, var, ...) {
+  var <- enquo(var)
+  
+  df <- data %>%
+    group_by(!!var) %>%
+    summarise(num = n()) %>%
+    arrange(num) %>% 
+    filter(!is.na(!!var)) %>% 
+    mutate(question = fct_inorder(!!var, ordered = TRUE))
+  
+  num <- sum(df$num)
+  
+  ggplot(df, aes(x = num, y = question)) +
+    geom_barh(stat = "identity") +
+    scale_x_continuous(expand = c(0, 0)) +
+    labs(x = "Number of respondents", y = NULL, caption = glue("N = {num}")) +
+    theme_ingos()
+}
+
+my_percent <- percent_format(accuracy = 1)
+
+matrix_from_vector <- function(x, ncol) {
+  n_balanced <- ceiling(length(x) / ncol) * ncol
+  matrix(c(x, rep(NA, n_balanced - length(x))), ncol = ncol)
+}
+
+cleaning <- c("\\t" = "",
+              "---" = "—",
+              "\\\\" = "\\")
+```
+
+\newpage
+
+# Introductory questions
+
+### *Q2.1*: What is the name of your organization?
+
+```{r q2-1, results='asis'}
+if (redact) {
+  pandoc.p("*List of organizations omitted for the sake of anonymity.*")
+} else {
+  cat("\\stgroup")
+  cat("\\renewcommand\\arraystretch{1.6}")
+  survey_orgs_clean %>% 
+    mutate(Q2.1 = str_replace_all(Q2.1, cleaning)) %>% 
+    arrange(Q2.1) %>% 
+    pull(Q2.1) %>% 
+    matrix_from_vector(3) %>% 
+    pandoc.table(split.tables = Inf, missing = "", justify = "lll")
+  cat("\\fingroup")
+}
+```
+
+\newpage
+
+```{r q2-2-process}
+df_hq_countries <- survey_orgs_clean %>% 
+  count(Q2.2_iso3, sort = TRUE) %>% 
+  mutate(region = countrycode(Q2.2_iso3, "iso3c", "continent"),
+         countryname = countrycode(Q2.2_iso3, "iso3c", "country.name")) %>% 
+  mutate(num_ceiling = ifelse(n >= 50, 50, n),
+         presence = n >= 1)
+
+map_with_hq <- world_shapes %>% 
+  left_join(df_hq_countries, by = c("ISO_A3" = "Q2.2_iso3"))
+```
+
+### *Q2.2*: Where is your organization's headquarters?
+
+#### Top 10 countries with NGO headquarters
+
+There are `r sum(df_hq_countries$presence)` unique countries where respondents are based.
+
+```{r q2-2-top-countries}
+df_hq_countries_top <- df_hq_countries %>% 
+  top_n(10, n) %>% 
+  mutate(countryname = fct_inorder(countryname, ordered = TRUE))
+
+ggplot(df_hq_countries_top, aes(x = n, y = fct_rev(countryname))) +
+  geom_barh(stat = "identity") +
+  scale_x_continuous(expand = c(0, 0),
+                     sec.axis = sec_axis(~ . / sum(df_hq_countries$n),
+                                         labels = my_percent)) +
+  labs(x = "Number of respondents", y = NULL, 
+       caption = glue("N = {sum(df_hq_countries$n)}")) +
+  theme_ingos() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+#### Regions of NGO headquarters
+
+```{r q2-2-region}
+df_hq_region <- df_hq_countries %>%
+  group_by(region) %>% 
+  summarize(n = sum(n)) %>% 
+  arrange(desc(n)) %>% 
+  mutate(region = fct_inorder(region, ordered = TRUE))
+  
+ggplot(df_hq_region, aes(x = n, y = fct_rev(region))) +
+  geom_barh(stat = "identity") +
+  scale_x_continuous(expand = c(0, 0),
+                     sec.axis = sec_axis(~ . / sum(df_hq_region$n),
+                                         labels = my_percent)) +
+  labs(x = "Number of respondents", y = NULL, 
+       caption = glue("N = {sum(df_hq_region$n)}")) +
+  theme_ingos() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+\newpage
+
+#### Countries with at least one response
+
+```{r q2-2-map-presence}
+ggplot(map_with_hq, aes(fill = presence)) +
+  geom_sf(size = 0.15, color = "black") +
+  coord_sf(crs = st_crs(projection), datum = NA) +
+  scale_fill_manual(values = c("grey50", "white"), 
+                    na.value = "white", guide = FALSE) +
+  theme_ingos_map()
+```
+
+#### Responses per country
+
+```{r q2-2-map-ceiling}
+ggplot(map_with_hq, aes(fill = num_ceiling)) +
+  geom_sf(size = 0.15, color = "black") +
+  coord_sf(crs = st_crs(projection), datum = NA) +
+  scale_fill_gradient(low = "grey95", high = "grey20", breaks = seq(0, 50, 10), 
+                      labels = c(paste(seq(0, 40, 10), "  "), "50+"),
+                      na.value = "white", name = "NGOs based in country",
+                      guide = guide_colourbar(ticks = FALSE, barwidth = 6)) + 
+  theme_ingos_map() +
+  theme(legend.position = "bottom", legend.key.size = unit(0.65, "lines"),
+        strip.background = element_rect(colour = "white", fill = "white"))
+```
+
+\newpage
+
+### *Q2.3*: What is your position in your organization?
+
+```{r q2-3}
+df_q2.3 <- survey_orgs_clean %>%
+  count(Q2.3, sort = TRUE) %>% 
+  mutate(question = fct_inorder(Q2.3, ordered = TRUE))
+
+ggplot(df_q2.3, aes(x = n, y = fct_rev(question))) +
+  geom_barh(stat = "identity") +
+  scale_x_continuous(expand = c(0, 0),
+                     sec.axis = sec_axis(~ . / sum(df_q2.3$n),
+                                         labels = my_percent)) +
+  labs(x = "Number of respondents", y = NULL, 
+       caption = glue("N = {sum(df_q2.3$n)}")) +
+  theme_ingos() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+```{r q2-3-other}
+position_other <- survey_orgs_clean %>%
+  filter(!is.na(Q2.3_TEXT)) %>%
+  mutate(position_in_org = str_to_title(Q2.3_TEXT)) %>% 
+  count(position_in_org, sort = TRUE) %>%
+  top_n(10, n) %>% 
+  mutate(position_in_org = fct_inorder(position_in_org, ordered = TRUE))
+
+ggplot(position_other, aes(x = n, y = fct_rev(position_in_org))) +
+  geom_barh(stat = "identity") +
+  scale_x_continuous(expand = c(0, 0),
+                     sec.axis = sec_axis(~ . / sum(df_q2.3$n),
+                                         labels = my_percent)) +
+  labs(x = "Number of respondents", y = NULL, 
+       caption = glue("N = {sum(df_q2.3$n)}")) +
+  theme_ingos() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+
+\newpage
+
+### *Q2.4*: Does your organization work in a country other than `home_country`?
+
+TODO: Explain process
+
+
+```{r q2-5-process}
+df_work_countries <- survey_orgs_clean %>% 
+  unnest(Q2.5_iso3) %>% 
+  count(Q2.5_iso3, sort = TRUE) %>% 
+  mutate(region = countrycode(Q2.5_iso3, "iso3c", "continent",
+                              custom_match = c(XKX = "Europe")),
+         countryname = countrycode(Q2.5_iso3, "iso3c", "country.name",
+                                   custom_match = c(XKX = "Kosovo"))) %>% 
+  mutate(num_ceiling = ifelse(n >= 50, 50, n),
+         presence = n >= 1)
+
+map_with_work <- world_shapes %>% 
+  left_join(df_work_countries, by = c("ISO_A3" = "Q2.5_iso3"))
+```
+
+### *Q2.5*: Besides `home_country`, where does your organization work?
+
+TODO: Other things here
+
+There are `r sum(df_work_countries$presence)` unique countries where respondents work—essentially the whole world.
+
+#### Countries per response
+
+```{r q2-5-hist}
+df_countries_per_org <- survey_orgs_clean %>% 
+  unnest(Q2.5_iso3) %>% 
+  count(clean.id)
+
+ggplot(df_countries_per_org, aes(x = n)) +
+  geom_histogram(binwidth = 2) +
+  labs(x = "Number of countries selected", y = "Number of organizations") +
+  theme_ingos() +
+  theme(panel.grid.minor = element_blank())
+```
+
+#### Responses per country
+
+```{r q2-5-map}
+ggplot(map_with_work, aes(fill = n)) +
+  geom_sf(size = 0.15, color = "black") +
+  coord_sf(crs = st_crs(projection), datum = NA) +
+  scale_fill_gradient(low = "grey95", high = "grey20",  
+                      na.value = "white", name = "NGOs reporting work in country",
+                      guide = guide_colourbar(ticks = FALSE, barwidth = 6)) + 
+  theme_ingos_map() +
+  theme(legend.position = "bottom", legend.key.size = unit(0.65, "lines"),
+        strip.background = element_rect(colour = "white", fill = "white"))
+```
+
+
+\newpage
+
+# Organizational questions
+
+### *Q3.1*: Which issues does your organization focus on? (select all that apply)
+
+Bar chart + list of other
+
+\newpage
+
+### *Q3.2*: Which issue does your organization focus on *the most*? (select one)
+
+Bar chart + list of other
+
+\newpage
+
+### *Q3.3*: Please indicate how often your organization engages in each of these types of activities:
+
+Somehow do something with this Qualtrics side-by-side table
+
+\newpage
+
+### *Q3.4*: Approximately how many full-time employees does your organization have?
+
+Histogram
+
+\newpage
+
+### *Q3.5*: Approximately how many volunteers does your organization have?
+
+Histogram
+
+\newpage
+
+### *Q3.6*: Does your organization collaborate with any of these organizations or institutions? (select all that apply)
+
+Bar chart with counts
+
+\newpage
+
+### *Q3.7*: Please list a few of the organizations or institutions you partner with most often:
+
+List of names - maybe show frequency?
+
+\newpage
+
+### *Q3.8*: How much of your organization's funding comes from each of these sources?
+
+Somehow show this side-by-side table too
+
+\newpage
+
+### *Q3.9*: In general, what would you say your organization is trying to accomplish?
+
+```{r q3-9, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_orgs_clean %>% 
+    mutate(Q3.9 = str_replace_all(Q3.9, cleaning)) %>% 
+    arrange(Q3.9) %>% 
+    filter(!is.na(Q3.9)) %>% 
+    pull(Q3.9) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q3.10*: How is your organization's mission, vision, and values reflected in these objectives?
+
+```{r q3-10, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_orgs_clean %>% 
+    mutate(Q3.10 = str_replace_all(Q3.10, cleaning)) %>% 
+    arrange(Q3.10) %>% 
+    filter(!is.na(Q3.10)) %>% 
+    pull(Q3.10) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q3.11*: Have these objectives changed at all in the last 10 years? If so, how?
+
+```{r q3-11, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_orgs_clean %>% 
+    mutate(Q3.11 = str_replace_all(Q3.11, cleaning)) %>% 
+    arrange(Q3.11) %>% 
+    filter(!is.na(Q3.11)) %>% 
+    pull(Q3.11) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q3.12*: What are the major obstacles, if any, to reaching your organization's objectives?
+
+```{r q3-12, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_orgs_clean %>% 
+    mutate(Q3.12 = str_replace_all(Q3.12, cleaning)) %>% 
+    arrange(Q3.12) %>% 
+    filter(!is.na(Q3.12)) %>% 
+    pull(Q3.12) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q3.13*: Are there any changes that you would like to see in your organization's goals and strategies, now or in the future?
+
+```{r q3-13, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_orgs_clean %>% 
+    mutate(Q3.13 = str_replace_all(Q3.13, cleaning)) %>% 
+    arrange(Q3.13) %>% 
+    filter(!is.na(Q3.13)) %>% 
+    pull(Q3.13) %>% 
+    pandoc.list()
+}
+```
+
+
+\newpage
+
+# Government relations
+
+TODO: Note about how this could be repeated - how many people actually repeated it
+
+## General questions
+
+### *Q4.1*: I will now ask a series of questions about your organization's relationship to the government of one of the countries you work in. Please select a country you would like to discuss:
+
+Map of countries
+
+\newpage
+
+### *Q4.2*: How long has your organization worked in `target_country`?
+
+Bar chart
+
+\newpage
+
+### *Q4.3*: What does your organization do in `target_country`? (select all that apply)
+
+Bar chart + multiple allowed
+
+\newpage
+
+### *Q4.4*: Is your organization registered with the national government in `target_country`?
+
+Bar chart
+
+
+\newpage
+
+## Contact with government
+
+### *Q4.5*: About how often does your organization have contact with government or party officials in `target_country`?
+
+Bar chart + other
+
+\newpage
+
+### *Q4.6*: What kind of government officials does your organization have contact with? (select all that apply)
+
+Bar chart + multiple + other
+
+\newpage
+
+### *Q4.7*: What kind of government officials does your organization have contact with *most often*? (select one)
+
+Bar chart + other
+
+\newpage
+
+### *Q4.8*: How often is your organization required to report to the government of `target_country`?
+
+Bar chart + other
+
+\newpage
+
+### *Q4.9*: Are members of the government or ruling party of `target_country` involved in your work?
+
+Bar chart
+
+\newpage
+
+### *Q4.10*: How is the government of `target_country` involved in your work?
+
+```{r q4-10, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.10 = str_replace_all(Q4.10, cleaning)) %>% 
+    arrange(Q4.10) %>% 
+    filter(!is.na(Q4.10)) %>% 
+    pull(Q4.10) %>% 
+    pandoc.list()
+}
+```
+
+\newpage
+
+## Relationship with government
+
+### *Q4.11*: How would you characterize your organization's relationship with the government of `target_country`? *Please note all survey responses will be kept strictly confidential*.
+
+Bar chart
+
+\newpage
+
+### *Q4.12*: Briefly describe your organization's relationship with the government of `target_country`:
+
+```{r q4-12, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.12 = str_replace_all(Q4.12, cleaning)) %>% 
+    arrange(Q4.12) %>% 
+    filter(!is.na(Q4.12)) %>% 
+    pull(Q4.12) %>% 
+    pandoc.list()
+}
+```
+
+
+\newpage
+
+## NGO regulations and restrictions
+
+### *Q4.13*: How familiar is your organization with regulations for international nongovernmental organizations (NGOs) in `target_country`?
+
+Bar chart
+
+\newpage
+
+### *Q4.14*: How often do regulations for international NGOs in `target_country` change?
+
+Bar chart
+
+\newpage
+
+### *Q4.15*: How does your organization find out about changes to NGO regulations in `target_country`? (select all that apply)
+
+Bar chart + multiple + other
+
+\newpage
+
+### *Q4.16*: How is your organization affected by the following types of legal regulations for international NGOs in `target_country`?
+
+Qualtrics thing
+
+\newpage
+
+### *Q4.16a*: Please describe how your organization is affected by regulations regarding registration.
+
+*Only display if corresponding response in Q4.16 is "A great deal", "A lot", "A moderate amount", or "A little"*
+
+```{r q4-16a, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.16_registration_TEXT = str_replace_all(Q4.16_registration_TEXT, cleaning)) %>% 
+    arrange(Q4.16_registration_TEXT) %>% 
+    filter(!is.na(Q4.16_registration_TEXT)) %>% 
+    pull(Q4.16_registration_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.16b*: Please describe how your organization is affected by regulations regarding operations.
+
+*Only display if corresponding response in Q4.16 is "A great deal", "A lot", "A moderate amount", or "A little"*
+
+```{r q4-16b, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.16_operations_TEXT = str_replace_all(Q4.16_operations_TEXT, cleaning)) %>% 
+    arrange(Q4.16_operations_TEXT) %>% 
+    filter(!is.na(Q4.16_operations_TEXT)) %>% 
+    pull(Q4.16_operations_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.16c*: Please describe how your organization is affected by regulations regarding speech and advocacy.
+
+*Only display if corresponding response in Q4.16 is "A great deal", "A lot", "A moderate amount", or "A little"*
+
+```{r q4-16c, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.16_speech_TEXT = str_replace_all(Q4.16_speech_TEXT, cleaning)) %>% 
+    arrange(Q4.16_speech_TEXT) %>% 
+    filter(!is.na(Q4.16_speech_TEXT)) %>% 
+    pull(Q4.16_speech_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.16d*: Please describe how your organization is affected by regulations regarding communication and cooperation.
+
+*Only display if corresponding response in Q4.16 is "A great deal", "A lot", "A moderate amount", or "A little"*
+
+```{r q4-16d, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.16_communications_TEXT = str_replace_all(Q4.16_communications_TEXT, cleaning)) %>% 
+    arrange(Q4.16_communications_TEXT) %>% 
+    filter(!is.na(Q4.16_communications_TEXT)) %>% 
+    pull(Q4.16_communications_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.16e*: Please describe how your organization is affected by regulations regarding assembly.
+
+*Only display if corresponding response in Q4.16 is "A great deal", "A lot", "A moderate amount", or "A little"*
+
+```{r q4-16e, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.16_assembly_TEXT = str_replace_all(Q4.16_assembly_TEXT, cleaning)) %>% 
+    arrange(Q4.16_assembly_TEXT) %>% 
+    filter(!is.na(Q4.16_assembly_TEXT)) %>% 
+    pull(Q4.16_assembly_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.16f*: Please describe how your organization is affected by regulations regarding resources.
+
+*Only display if corresponding response in Q4.16 is "A great deal", "A lot", "A moderate amount", or "A little"*
+
+```{r q4-16f, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.16_resources_TEXT = str_replace_all(Q4.16_resources_TEXT, cleaning)) %>% 
+    arrange(Q4.16_resources_TEXT) %>% 
+    filter(!is.na(Q4.16_resources_TEXT)) %>% 
+    pull(Q4.16_resources_TEXT) %>% 
+    pandoc.list()
+}
+```
+
+\newpage
+
+### *Q4.17*: Overall, how is your organization's work affected by government regulations in `target_country`?
+
+Bar chart
+
+\newpage
+
+### *Q4.18*: How do the local laws and regulations in `target_country` affect your organization's ability to pursue its mission?
+
+```{r q4-18, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.18 = str_replace_all(Q4.18, cleaning)) %>% 
+    arrange(Q4.18) %>% 
+    filter(!is.na(Q4.18)) %>% 
+    pull(Q4.18) %>% 
+    pandoc.list()
+}
+```
+
+
+\newpage
+
+## Responses to regulations
+
+### *Q4.19*: Over the last 10 years, has your organization changed its mix of programming in `target_country`?
+
+Bar chart
+
+\newpage
+
+### *Q4.20*: How has your organization's mix of programming changed in `target_country`?
+
+*Display if Q4.19 is "Yes"*
+
+```{r q4-20, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.20 = str_replace_all(Q4.20, cleaning)) %>% 
+    arrange(Q4.20) %>% 
+    filter(!is.na(Q4.20)) %>% 
+    pull(Q4.20) %>% 
+    pandoc.list()
+}
+```
+
+\newpage
+
+### *Q4.21*: Has your organization done any of the following in response to changes in government regulations in `target_country`?
+
+Qualtrics thing
+
+\newpage
+
+### *Q4.21a*: Please describe how your organization changed its funding sources. What regulation were you responding to?
+
+*Display if corresponding answer in Q4.21 is "Yes"*
+
+```{r q4-21a, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.21_funding_TEXT = str_replace_all(Q4.21_funding_TEXT, cleaning)) %>% 
+    arrange(Q4.21_funding_TEXT) %>% 
+    filter(!is.na(Q4.21_funding_TEXT)) %>% 
+    pull(Q4.21_funding_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.21b*: Please describe how your organization changed which issues it works on. What regulation were you responding to?
+
+*Display if corresponding answer in Q4.21 is "Yes"*
+
+```{r q4-21b, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.21_issues_TEXT = str_replace_all(Q4.21_issues_TEXT, cleaning)) %>% 
+    arrange(Q4.21_issues_TEXT) %>% 
+    filter(!is.na(Q4.21_issues_TEXT)) %>% 
+    pull(Q4.21_issues_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.21c*: Please describe how your organization changed how it communicates with the government. What regulation were you responding to?
+
+*Display if corresponding answer in Q4.21 is "Yes"*
+
+```{r q4-21c, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.21_comm_govt_TEXT = str_replace_all(Q4.21_comm_govt_TEXT, cleaning)) %>% 
+    arrange(Q4.21_comm_govt_TEXT) %>% 
+    filter(!is.na(Q4.21_comm_govt_TEXT)) %>% 
+    pull(Q4.21_comm_govt_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.21d*: Please describe how your organization changed how it communicates with donors. What regulation were you responding to?
+
+*Display if corresponding answer in Q4.21 is "Yes"*
+
+```{r q4-21d, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.21_comm_donors_TEXT = str_replace_all(Q4.21_comm_donors_TEXT, cleaning)) %>% 
+    arrange(Q4.21_comm_donors_TEXT) %>% 
+    filter(!is.na(Q4.21_comm_donors_TEXT)) %>% 
+    pull(Q4.21_comm_donors_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.21e*: Please describe how your organization changed the locations it works in. What regulation were you responding to?
+
+*Display if corresponding answer in Q4.21 is "Yes"*
+
+```{r q4-21e, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.21_locations_TEXT = str_replace_all(Q4.21_locations_TEXT, cleaning)) %>% 
+    arrange(Q4.21_locations_TEXT) %>% 
+    filter(!is.na(Q4.21_locations_TEXT)) %>% 
+    pull(Q4.21_locations_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.21f*: Please describe how your organization changed the location of its country office. What regulation were you responding to?
+
+*Display if corresponding answer in Q4.21 is "Yes"*
+
+```{r q4-21f, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.21_country_office_TEXT = str_replace_all(Q4.21_country_office_TEXT, cleaning)) %>% 
+    arrange(Q4.21_country_office_TEXT) %>% 
+    filter(!is.na(Q4.21_country_office_TEXT)) %>% 
+    pull(Q4.21_country_office_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.21g*: Please describe how your organization used more local staff or volunteers. What regulation were you responding to?
+
+*Display if corresponding answer in Q4.21 is "Yes"*
+
+```{r q4-21g, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.21_local_staff_TEXT = str_replace_all(Q4.21_local_staff_TEXT, cleaning)) %>% 
+    arrange(Q4.21_local_staff_TEXT) %>% 
+    filter(!is.na(Q4.21_local_staff_TEXT)) %>% 
+    pull(Q4.21_local_staff_TEXT) %>% 
+    pandoc.list()
+  cat("\\newpage")
+}
+```
+
+### *Q4.21h*: Please describe how your organization used more foreign staff or volunteers. What regulation were you responding to?
+
+*Display if corresponding answer in Q4.21 is "Yes"*
+
+```{r q4-21h, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_countries_clean %>% 
+    mutate(Q4.21_foreign_staff_TEXT = str_replace_all(Q4.21_foreign_staff_TEXT, cleaning)) %>% 
+    arrange(Q4.21_foreign_staff_TEXT) %>% 
+    filter(!is.na(Q4.21_foreign_staff_TEXT)) %>% 
+    pull(Q4.21_foreign_staff_TEXT) %>% 
+    pandoc.list()
+}
+```
+
+\newpage
+
+### *Q4.22*: Has your organization discussed NGO regulations with government officials in `target_country`?
+
+Bar chart
+
+\newpage
+
+### *Q4.23*: Has your organization tried to change NGO regulations in `target_country`?
+
+Bar chart
+
+
+\newpage
+
+# Final questions
+
+### *Q5.1*: Do you have any additional comments?
+
+```{r q5-1, results='asis'}
+if (redact) {
+  pandoc.p("*Responses omitted for the sake of anonymity.*")
+} else {
+  survey_orgs_clean %>% 
+    mutate(Q5.1 = str_replace_all(Q5.1, cleaning)) %>% 
+    arrange(Q5.1) %>% 
+    filter(!is.na(Q5.1)) %>% 
+    pull(Q5.1) %>% 
+    pandoc.list()
+}
+```
